@@ -1,4 +1,4 @@
-name: OpenWrt_24.10_Full_Firmware_Upload
+name: OpenWrt_24.10_Full_Software_Keep
 
 on:
   workflow_dispatch:
@@ -13,28 +13,25 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: 1. 检出与清理空间
+    - name: 1. 检出源码
       uses: actions/checkout@v4
 
-    - name: 释放磁盘空间
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: true
-        android: true
-        dotnet: true
-
-    - name: 2. 安装环境与升级 Go 1.25+
+    - name: 2. 安装环境与 Go 1.25 (官方二进制)
       run: |
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install $(curl -fsSL https://is.gd/depends_ubuntu_2204)
         sudo apt-get remove -y golang-go
-        # 安装最新版 Go 以满足 v2ray-plugin 等插件需求
-        curl -L https://git.io/vXGSu | bash -s -- --version 1.25.0
-        echo "PATH=$PATH:/usr/local/go/bin" >> $GITHUB_PATH
+        
+        # 确保 Go 版本绝对满足 1.25+，防止 v2ray-plugin 等丢失
+        wget -q https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
+        sudo tar -C /usr/local -xzf go1.25.0.linux-amd64.tar.gz
+        rm go1.25.0.linux-amd64.tar.gz
+        
+        echo "/usr/local/go/bin" >> $GITHUB_PATH
         sudo ln -sf /usr/local/go/bin/go /usr/bin/go
         sudo timedatectl set-timezone "$TZ"
 
-    - name: 3. 更新插件源与去重
+    - name: 3. 更新插件源与去重 (核心：确保 feeds 完整)
       run: |
         git clone $REPO_URL -b $REPO_BRANCH openwrt
         cd openwrt
@@ -42,14 +39,15 @@ jobs:
         echo "src-git small https://github.com/kenzok8/small-package" >> feeds.conf.default
         
         ./scripts/feeds update -a
-        find feeds/ -name "geoview" -type d | xargs rm -rf
+        # 仅删除已知冲突项，保留所有第三方软件
         rm -rf feeds/luci/applications/luci-app-passwall
         rm -rf feeds/luci/applications/luci-app-smartdns
         rm -rf feeds/packages/lang/golang
         
+        # 强制安装所有 feeds，-f 确保不丢失任何包
         ./scripts/feeds install -a -f
 
-    - name: 4. 固件定制配置
+    - name: 4. 固件定制配置 (全量插件选择)
       run: |
         cd openwrt
         cat >> .config <<EOF
@@ -59,34 +57,42 @@ jobs:
         CONFIG_LUCI_LANG_zh_Hans=y
         CONFIG_PACKAGE_luci-theme-bootstrap=y
         CONFIG_LUCI_THEME_DEFAULT="bootstrap"
+        
+        # 基础组件
         CONFIG_PACKAGE_kmod-e1000=y
         CONFIG_PACKAGE_kmod-e1000e=y
-        CONFIG_PACKAGE_kmod-usb-net=y
-        CONFIG_PACKAGE_kmod-usb-net-asix=y
         CONFIG_PACKAGE_kmod-usb-net-rtl8152=y
+        
+        # 核心软件 (确保这些 CONFIG 为 y)
         CONFIG_PACKAGE_luci-app-passwall=y
         CONFIG_PACKAGE_luci-app-smartdns=y
         CONFIG_PACKAGE_luci-app-adguardhome=y
         # CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary is not set
+        
+        # 其他必须保留的软件
         CONFIG_PACKAGE_luci-app-ddns=y
         CONFIG_PACKAGE_ddns-scripts-cloudflare=y
         CONFIG_PACKAGE_luci-app-syncdial=y
         CONFIG_PACKAGE_luci-app-mwan3=y
         CONFIG_PACKAGE_ipv6helper=y
+        CONFIG_PACKAGE_luci-app-ttyd=y
         EOF
         
+        # 扩展：将所有设置为 m 的包尝试转为 y (编入固件而非模块)
+        sed -i 's/=m/=y/g' .config
         make defconfig
 
     - name: 5. 源码预下载
       run: |
         cd openwrt
         make download -j8
-        find dl -size -1024c -exec rm -f {} \;
 
-    - name: 6. 执行编译
+    - name: 6. 执行编译 (含错误日志捕获)
       id: compile
       run: |
         cd openwrt
+        export PATH="/usr/local/go/bin:$PATH"
+        # 优先多线程，失败转单线程
         make -j$(nproc) || make -j1 V=s 2>&1 | tee build.log
         if [ ${PIPESTATUS[0]} -eq 0 ]; then
           echo "status=success" >> $GITHUB_OUTPUT
@@ -95,32 +101,26 @@ jobs:
         fi
         echo "FILE_DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    - name: 7. 整理固件与配置文件
+    - name: 7. 搜集所有产出 (固件+所有ipk软件)
       if: always()
       run: |
-        mkdir -p FIRMWARE
-        # 搜寻所有生成的镜像文件、配置文件和清单
-        # 包含常见的 .img, .gz, .vmdk, .manifest 等
-        find openwrt/bin/targets/x86/64/ -type f \
-          \( -name "*.img*" -o -name "*.manifest" -o -name "*.config" -o -name "*.vmdk" -o -name "*.buildinfo" \) \
-          -exec cp -v {} FIRMWARE/ \;
-        
-        # 检查是否真的搜寻到了文件
-        if [ -z "$(ls -A FIRMWARE)" ]; then
-          echo "警告：未找到编译生成的固件文件！"
-        else
-          echo "固件整理完成，准备上传。"
+        mkdir -p FIRMWARE_ALL
+        # 1. 搜集镜像文件
+        if [ -d "openwrt/bin/targets/x86/64/" ]; then
+          find openwrt/bin/targets/x86/64/ -type f \( -name "*.img*" -o -name "*.manifest" -o -name "*.config" \) -exec cp -v {} FIRMWARE_ALL/ \;
         fi
+        # 2. 搜集所有编译出的插件包 (ipk)，确保软件不丢失
+        mkdir -p FIRMWARE_ALL/packages
+        find openwrt/bin/packages/x86_64/ -type f -name "*.ipk" -exec cp -v {} FIRMWARE_ALL/packages/ \; 2>/dev/null || true
+        
+        # 3. 搜集日志
+        [ -f openwrt/build.log ] && cp -v openwrt/build.log FIRMWARE_ALL/
+        
+        # 兜底：防止目录为空导致上传失败
+        [ -z "$(ls -A FIRMWARE_ALL)" ] && echo "Empty build" > FIRMWARE_ALL/empty.txt
 
-    - name: 8. 上传所有固件
+    - name: 8. 上传所有固件与软件包
       uses: actions/upload-artifact@v4
       with:
-        name: OpenWrt_x86_64_Firmware_${{ env.FILE_DATE }}
-        path: FIRMWARE/
-
-    - name: 9. 上传编译日志 (供报错排查)
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: Build_Log_Error_${{ env.FILE_DATE }}
-        path: openwrt/build.log
+        name: OpenWrt_x86_64_All_Files_${{ env.FILE_DATE }}
+        path: FIRMWARE_ALL/
