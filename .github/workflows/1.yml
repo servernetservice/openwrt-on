@@ -1,0 +1,219 @@
+name: OpenWrt_24.10_NoADG_Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_arch:
+        description: '目标架构'
+        required: true
+        default: 'x86_64'
+        type: choice
+        options:
+        - x86_64
+        - armvirt_64
+        - mediatek_mt7622
+      include_adg:
+        description: '包含AdGuardHome二进制'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REPO_URL: https://github.com/openwrt/openwrt
+  REPO_BRANCH: openwrt-24.10
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        target: [${{ github.event.inputs.target_arch || 'x86_64' }}]
+
+    steps:
+    - name: 1. 检出与清理空间
+      uses: actions/checkout@v4
+
+    - name: 释放磁盘空间
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+
+    - name: 2. 安装环境与依赖
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y $(curl -fsSL https://is.gd/depends_ubuntu_2204)
+        # 安装Go 1.22+（OpenWrt 24.10要求）
+        wget https://go.dev/dl/go1.22.5.linux-amd64.tar.gz
+        sudo tar -C /usr/local -xzf go1.22.5.linux-amd64.tar.gz
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+        source ~/.bashrc
+        sudo timedatectl set-timezone "$TZ"
+
+    - name: 3. 设置缓存
+      uses: actions/cache@v3
+      id: dl-cache
+      with:
+        path: |
+          ~/dl-cache
+          openwrt/dl
+        key: ${{ runner.os }}-dl-${{ hashFiles('feeds.conf.default') }}
+        restore-keys: |
+          ${{ runner.os }}-dl-
+
+    - name: 4. 克隆源码与配置feeds
+      run: |
+        # 优先使用缓存
+        if [ -d ~/dl-cache ]; then
+          ln -sf ~/dl-cache dl-cache
+        fi
+        
+        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+        cd openwrt
+        
+        # 自定义feeds
+        cat > feeds.conf.default <<EOF
+        src-git-full packages https://git.openwrt.org/feed/packages.git^a4bca5f
+        src-git-full luci https://git.openwrt.org/project/luci.git^360cffa
+        src-git-full routing https://git.openwrt.org/feed/routing.git^33e0e7c
+        src-git-full telephony https://git.openwrt.org/feed/telephony.git^de33659
+        src-git kenzo https://github.com/kenzok8/openwrt-packages
+        src-git small https://github.com/kenzok8/small-package
+        EOF
+        
+        # 去重处理
+        ./scripts/feeds update -a
+        find feeds/ -name "geoview" -type d | xargs rm -rf 2>/dev/null || true
+        rm -rf feeds/luci/applications/luci-app-passwall 2>/dev/null || true
+        rm -rf feeds/luci/applications/luci-app-smartdns 2>/dev/null || true
+        
+        # 安装feeds（带冲突检测）
+        ./scripts/feeds install -a -f
+        ./scripts/feeds install -a
+
+    - name: 5. 动态配置生成
+      id: config-gen
+      run: |
+        cd openwrt
+        
+        # 基础配置
+        case "${{ matrix.target }}" in
+          "x86_64")
+            echo "CONFIG_TARGET_x86=y" >> .config
+            echo "CONFIG_TARGET_x86_64=y" >> .config
+            echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
+            ;;
+          "armvirt_64")
+            echo "CONFIG_TARGET_armvirt=y" >> .config
+            echo "CONFIG_TARGET_armvirt_64=y" >> .config
+            ;;
+          "mediatek_mt7622")
+            echo "CONFIG_TARGET_mediatek=y" >> .config
+            echo "CONFIG_TARGET_mediatek_mt7622=y" >> .config
+            ;;
+        esac
+        
+        # 通用配置
+        cat >> .config <<EOF
+CONFIG_LUCI_LANG_zh_Hans=y
+CONFIG_LUCI_THEME_DEFAULT="bootstrap"
+CONFIG_PACKAGE_luci-theme-bootstrap=y
+CONFIG_PACKAGE_luci-app-passwall=y
+CONFIG_PACKAGE_luci-app-smartdns=y
+CONFIG_PACKAGE_luci-app-ddns=y
+CONFIG_PACKAGE_ddns-scripts-cloudflare=y
+CONFIG_PACKAGE_luci-app-mwan3=y
+CONFIG_PACKAGE_ipv6helper=y
+CONFIG_PACKAGE_kmod-e1000=y
+CONFIG_PACKAGE_kmod-e1000e=y
+CONFIG_PACKAGE_kmod-usb-net=y
+EOF
+        
+        # AdGuardHome配置（根据输入动态设置）
+        if ${{ github.event.inputs.include_adg == 'true' }}; then
+          echo "CONFIG_PACKAGE_luci-app-adguardhome=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary=y" >> .config
+        else
+          echo "CONFIG_PACKAGE_luci-app-adguardhome=y" >> .config
+          echo "# CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary is not set" >> .config
+        fi
+        
+        make defconfig
+        
+        # 显示最终配置摘要
+        echo "=== 配置摘要 ==="
+        grep "^CONFIG_" .config | grep -v "is not set" | head -20
+
+    - name: 6. 并行下载与校验
+      run: |
+        cd openwrt
+        # 使用aria2加速下载
+        sudo apt-get install -y aria2
+        make download -j8 2>&1 | tee download.log
+        
+        # 校验文件完整性
+        find dl -name "*.hash" -exec sh -c 'cd $(dirname {}) && sha256sum -c $(basename {}) 2>/dev/null' \;
+        
+        # 清理无效文件
+        find dl -size -1024c -exec rm -f {} \; 2>/dev/null
+
+    - name: 7. 编译固件
+      id: compile
+      timeout-minutes: 120
+      run: |
+        cd openwrt
+        
+        # 编译配置优化
+        export FORCE_UNSAFE_CONFIGURE=1
+        export BUILD_LOG=1
+        
+        # 分阶段编译（提升成功率）
+        echo "阶段1: 编译工具链..."
+        make toolchain/install -j$(($(nproc) + 1))
+        
+        echo "阶段2: 编译内核..."
+        make target/compile -j$(($(nproc) + 1))
+        
+        echo "阶段3: 编译包..."
+        make package/compile -j$(($(nproc) + 1))
+        
+        echo "阶段4: 最终组装..."
+        make -j$(($(nproc) + 1)) || {
+          echo "并行编译失败，切换单线程调试模式..."
+          make V=sc 2>&1 | tee build_debug.log
+          exit 1
+        }
+
+    - name: 8. 固件后处理
+      if: success()
+      run: |
+        cd openwrt/bin/targets/*/*
+        
+        # 重命名固件（包含时间戳和版本）
+        for img in *-sysupgrade.bin; do
+          [ -f "$img" ] && mv "$img" "OpenWrt_$(date +%Y%m%d)_${img}"
+        done
+        
+        # 生成SHA256校验
+        sha256sum * > SHA256SUMS
+
+    - name: 9. 上传构建结果
+      uses: actions/upload-artifact@v4
+      with:
+        name: OpenWrt_${{ matrix.target }}_${{ github.run_number }}
+        path: |
+          openwrt/bin/targets/**/*.bin
+          openwrt/bin/targets/**/*.img
+          openwrt/bin/targets/**/SHA256SUMS
+          openwrt/build.log
+          openwrt/download.log
+        retention-days: 7
+
+    - name: 10. 失败调试支持
+      if: failure()
+      run: |
+        cd openwrt
+        tail -100 build.log 2>/dev/null || echo "无build.log"
+        find . -name "*.log" -size +1M | head -5 | xargs tail -50
