@@ -1,0 +1,90 @@
+name: OpenWrt_Auto_Build
+
+on:
+  workflow_dispatch: # 手动触发编译
+
+env:
+  REPO_URL: https://github.com/openwrt/openwrt
+  REPO_BRANCH: openwrt-23.05
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 1. 准备工作 & 清理磁盘
+      uses: actions/checkout@v4
+    - name: 释放磁盘空间
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+
+    - name: 2. 安装编译环境
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install $(curl -fsSL https://is.gd/depends_ubuntu_2204)
+        sudo timedatectl set-timezone "$TZ"
+
+    - name: 3. 克隆源码与更新插件源
+      run: |
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        cd openwrt
+        # 添加 kenzok8 插件源
+        echo "src-git kenzo https://github.com/kenzok8/small-package" >> feeds.conf.default
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: 4. 固件定制配置
+      run: |
+        cd openwrt
+        # 目标架构：Intel Generic
+        echo "CONFIG_TARGET_x86=y" >> .config
+        echo "CONFIG_TARGET_x86_64=y" >> .config
+        echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
+        
+        # 语言包
+        echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+        
+        # 网卡驱动：E1000 & USB
+        echo "CONFIG_PACKAGE_kmod-e1000=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-e1000e=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-usb-net=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-usb-net-asix=y" >> .config
+        echo "CONFIG_PACKAGE_kmod-usb-net-rtl8152=y" >> .config
+        
+        # 核心插件集成
+        echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-smartdns=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-adguardhome=y" >> .config
+        echo "# CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary is not set" >> .config
+        echo "CONFIG_PACKAGE_luci-app-ddns=y" >> .config
+        echo "CONFIG_PACKAGE_ddns-scripts-cloudflare=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-syncdial=y" >> .config
+        echo "CONFIG_PACKAGE_luci-app-mwan3=y" >> .config
+        
+        # IPv6 支持
+        echo "CONFIG_PACKAGE_ipv6helper=y" >> .config
+        
+        # 自动处理依赖冲突
+        make defconfig
+
+    - name: 5. 预下载源码包 (防止编译中途断网)
+      run: |
+        cd openwrt
+        make download -j8
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: 6. 执行编译 (Code 1/2 容错)
+      run: |
+        cd openwrt
+        # 如果多线程失败，自动转为单线程详细模式
+        make -j$(nproc) || make -j1 V=s
+
+    - name: 7. 上传固件
+      uses: actions/upload-artifact@v4
+      with:
+        name: OpenWrt_Generic_Firmware
+        path: openwrt/bin/targets/x86/64/
