@@ -1,4 +1,4 @@
-name: OpenWrt_24.10_Full_Firmware_All_Software
+name: OpenWrt_24.10_Full_Software_Upload
 
 on:
   workflow_dispatch:
@@ -43,7 +43,7 @@ jobs:
         rm -rf feeds/packages/lang/golang
         ./scripts/feeds install -a -f
 
-    - name: 4. 固件定制配置 (全量集成)
+    - name: 4. 固件定制配置 (全量软件集成)
       run: |
         cd openwrt
         cat >> .config <<EOF
@@ -58,60 +58,4 @@ jobs:
         CONFIG_PACKAGE_kmod-e1000=y
         CONFIG_PACKAGE_kmod-e1000e=y
         CONFIG_PACKAGE_kmod-usb-net-rtl8152=y
-        CONFIG_PACKAGE_luci-app-passwall=y
-        CONFIG_PACKAGE_luci-app-smartdns=y
-        CONFIG_PACKAGE_luci-app-adguardhome=y
-        # CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary is not set
-        CONFIG_PACKAGE_luci-app-ddns=y
-        CONFIG_PACKAGE_ddns-scripts-cloudflare=y
-        CONFIG_PACKAGE_luci-app-syncdial=y
-        CONFIG_PACKAGE_luci-app-mwan3=y
-        CONFIG_PACKAGE_ipv6helper=y
-        CONFIG_PACKAGE_luci-app-ttyd=y
-        EOF
-        
-        # 强制所有设为 m 的软件包全部转为 y 直接集成进固件镜像
-        sed -i 's/=m/=y/g' .config
-        make defconfig
-
-    - name: 5. 源码下载
-      run: |
-        cd openwrt
-        make download -j8
-
-    - name: 6. 执行编译
-      id: compile
-      run: |
-        cd openwrt
-        export PATH="/usr/local/go/bin:$PATH"
-        make -j$(nproc) || make -j1 V=s 2>&1 | tee build.log
-        if [ ${PIPESTATUS[0]} -eq 0 ]; then
-          echo "status=success" >> $GITHUB_OUTPUT
-        else
-          echo "status=fail" >> $GITHUB_OUTPUT
-        fi
-        echo "FILE_DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
-    - name: 7. 整理全量产出 (固件+所有软件包)
-      if: always()
-      run: |
-        mkdir -p FIRMWARE_ALL
-        # 1. 拷贝所有的编译结果目录 (含 bin/targets 和 bin/packages)
-        if [ -d "openwrt/bin" ]; then
-          cp -rf openwrt/bin/* FIRMWARE_ALL/
-        fi
-        
-        # 2. 拷贝配置文件用于备份
-        [ -f openwrt/.config ] && cp openwrt/.config FIRMWARE_ALL/build_config.config
-        
-        # 3. 拷贝详细编译日志
-        [ -f openwrt/build.log ] && cp openwrt/build.log FIRMWARE_ALL/
-        
-        # 4. 清理无用的空目录或临时链接
-        find FIRMWARE_ALL/ -type l -delete
-
-    - name: 8. 上传所有固件与软件源
-      uses: actions/upload-artifact@v4
-      with:
-        name: OpenWrt_x86_64_Full_Pack_${{ env.FILE_DATE }}
-        path: FIRMWARE_ALL/
+        CONFIG_PACKAGE_luci-app-passwall=
