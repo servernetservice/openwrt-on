@@ -78,7 +78,7 @@ jobs:
       run: |
         cd openwrt
         # 添加第三方插件源
-        cat >> feeds.conf.default << EOF
+        cat >> feeds.conf.default << 'EOF'
         src-git kenzo https://github.com/kenzok8/openwrt-packages
         src-git small https://github.com/kenzok8/small-package
         EOF
