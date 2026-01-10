@@ -1,120 +1,98 @@
-name: OpenWrt_24.10_NoADG_Kernel
+name: Build OpenWrt 24.10
 
 on:
+  repository_dispatch:
   workflow_dispatch:
 
 env:
   REPO_URL: https://github.com/openwrt/openwrt
   REPO_BRANCH: openwrt-24.10
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
   TZ: Asia/Shanghai
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
-    - name: 1. 检出与清理空间
+    - name: Checkout
       uses: actions/checkout@v4
 
-    - name: 释放磁盘空间
+    - name: Free Disk Space (Cleanup)
       uses: jlumbroso/free-disk-space@main
       with:
         tool-cache: true
         android: true
         dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
 
-    - name: 2. 安装环境与 Go 升级
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install $(curl -fsSL https://is.gd/depends_ubuntu_2204)
-        sudo add-apt-repository ppa:longsleep/golang-backports -y
-        sudo apt update
-        sudo apt install golang-go -y
+        sudo apt-get update
+        sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig libpython3-dev libelf-dev llzma liblzma-dev zstd libzstd-dev
         sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
 
-    - name: 3. 更新插件源与去重
+    - name: Clone source code
+      working-directory: /workdir
       run: |
+        df -hT $PWD
         git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+
+    - name: Load custom feeds
+      run: |
+        [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
         cd openwrt
-        echo "src-git kenzo https://github.com/kenzok8/openwrt-packages" >> feeds.conf.default
-        echo "src-git small https://github.com/kenzok8/small-package" >> feeds.conf.default
-        
         ./scripts/feeds update -a
-        # 删除冲突包，优先使用第三方源
-        find feeds/ -name "geoview" -type d | xargs rm -rf
-        rm -rf feeds/luci/applications/luci-app-passwall
-        rm -rf feeds/luci/applications/luci-app-smartdns
-        rm -rf feeds/packages/net/adguardhome
-        
         ./scripts/feeds install -a
 
-    - name: 4. 固件定制配置
+    - name: Load custom configuration
       run: |
+        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
         cd openwrt
-        # 基础架构设置
-        echo "CONFIG_TARGET_x86=y" >> .config
-        echo "CONFIG_TARGET_x86_64=y" >> .config
-        echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
-        
-        # 语言与主题 (Bootstrap)
-        echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
-        echo "CONFIG_PACKAGE_luci-theme-bootstrap=y" >> .config
-        echo "CONFIG_LUCI_THEME_DEFAULT=\"bootstrap\"" >> .config
-        
-        # 核心插件
-        echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-smartdns=y" >> .config
-        
-        # 【关键】AdGuardHome 只装界面，不含内核 (强制设为 n)
-        echo "CONFIG_PACKAGE_luci-app-adguardhome=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-adguardhome_INCLUDE_binary=n" >> .config
-        
-        # 网卡驱动与常用工具
-        echo "CONFIG_PACKAGE_kmod-e1000=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-e1000e=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-usb-net=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-usb-net-asix=y" >> .config
-        echo "CONFIG_PACKAGE_kmod-usb-net-rtl8152=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-ddns=y" >> .config
-        echo "CONFIG_PACKAGE_ddns-scripts-cloudflare=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-syncdial=y" >> .config
-        echo "CONFIG_PACKAGE_luci-app-mwan3=y" >> .config
-        echo "CONFIG_PACKAGE_ipv6helper=y" >> .config
-        
-        # 补充：确保磁盘分区足够大 (针对 X86)
-        echo "CONFIG_TARGET_KERNEL_PARTSIZE=64" >> .config
-        echo "CONFIG_TARGET_ROOTFS_PARTSIZE=512" >> .config
-        
         make defconfig
+        # 生成详细配置备份
+        make config
 
-    - name: 5. 源码预下载
+    - name: Download package
+      id: package
       run: |
         cd openwrt
         make download -j8
+        find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: 6. 执行编译
+    - name: Compile the firmware
       id: compile
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
         # 第一次尝试多线程编译
-        make -j$(nproc) || make -j1 V=s
+        make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
+        grep "CONFIG_TARGET_DEVICE_.*=y" .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    - name: 7. 整理固件文件
-      if: steps.compile.outputs.status == 'success'
-      run: |
-        cd openwrt/bin/targets/x86/64
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT
 
-    - name: 8. 上传日志与固件
-      if: always()
+    - name: Upload firmware directory
       uses: actions/upload-artifact@v4
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
       with:
-        name: OpenWrt_Build_Results
-        path: |
-          ${{ env.FIRMWARE }}/*
-          openwrt/.config
-          openwrt/build.log
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: openwrt/bin/targets/x86/64/
