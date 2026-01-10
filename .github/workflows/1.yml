@@ -1,4 +1,4 @@
-name: OpenWrt-24.10-x86_64-Generic-Final
+name: OpenWrt-24.10-x86_1
 
 on:
   workflow_dispatch:
