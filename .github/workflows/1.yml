@@ -1,113 +1,151 @@
-name: Build OpenWrt x86_64 (24.10)
+name: 📦 Build OpenWrt 24.10 x86_64 Full NIC
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main", "master"]
   workflow_dispatch:
+
+env:
+  OPENWRT_VERSION: "openwrt-24.10"
+  TARGET_ARCH: "x86_64"
+  TARGET_PROFILE: "GENERIC"
 
 jobs:
   build:
-    name: Build OpenWrt 24.10 x86_64
-    runs-on: ubuntu‑22.04
-    timeout-minutes: 360
+    name: ⚙️ Build OpenWrt with Full NIC Drivers
+    runs-on: ubuntu-latest
+    timeout-minutes: 480
 
     steps:
+      - name: 🧹 Prepare Workspace
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential libncurses5-dev gawk git gettext \
+            libssl-dev xsltproc unzip zlib1g-dev file rsync curl
+          df -h
 
-    - name: 清理旧 Runner 环境
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential libssl-dev python3
-    
-    - name: Checkout OpenWrt
-      uses: actions/checkout@v4
-      with:
-        repository: openwrt/openwrt
-        ref: v24.10.0
-        fetch-depth: 0
+      - name: 📥 Checkout OpenWrt Source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-    - name: 更新 feeds
-      run: |
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+      - name: 🔄 Clone OpenWrt 24.10
+        run: |
+          rm -rf openwrt
+          git clone https://github.com/openwrt/openwrt.git -b ${OPENWRT_VERSION} --depth 1 openwrt
 
-    # -------------------------
-    # 添加 third‑party small‑package 源
-    - name: 添加 small‑package 源
-      run: |
-        # 示例添加（可按需要调整）
-        cat >> feeds.conf.default <<EOF
-        src‑git smallpkg https://github.com/coolsnowwolf/small‑package
-        EOF
-        ./scripts/feeds update smallpkg
-        ./scripts/feeds install -a -p smallpkg
+      - name: 📦 Update Feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-    - name: 清理旧配置
-      run: make distclean
+      - name: 🧠 Apply Config (defconfig with full NIC)
+        run: |
+          cd openwrt
+          cat > .config << 'EOF'
+# Target
+CONFIG_TARGET_x86=y
+CONFIG_TARGET_x86_64=y
+CONFIG_TARGET_x86_64_Generic=y
 
-    - name: 自动生成默认配置
-      run: |
-        make x86_64_generic_defconfig
+# Build Options
+CONFIG_DEVEL=y
+CONFIG_BUILD_LOG=y
+CONFIG_LLVM_CLANG=y
 
-    - name: 覆盖自定义配置
-      run: |
-        # 使用 .config 定制内核/SOFTPACKAGES/LUCI
-        cat > .config << 'EOF'
-        CONFIG_TARGET_x86=y
-        CONFIG_TARGET_x86_64=y
-        CONFIG_TARGET_x86_64_generic=y
+# IPv6
+CONFIG_IPV6=y
+CONFIG_PACKAGE_ipv6helper=y
+CONFIG_PACKAGE_ip-full=y
+CONFIG_PACKAGE_ip6tables=y
 
-        # IPv6 支持
-        CONFIG_IPV6=y
-        CONFIG_PACKAGE_dnsmasq_full_dhcpv6=y
+# LuCI Base & Theme
+CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-base=y
+CONFIG_PACKAGE_luci-bootstrap=y
 
-        # Multi‑Dial
-        CONFIG_PACKAGE_mwan3=y
-        CONFIG_PACKAGE_mwan3helper=y
+# Multi PPPoE
+CONFIG_PACKAGE_ppp=y
+CONFIG_PACKAGE_ppp-mod-pppoe=y
+CONFIG_PACKAGE_luci-proto-pppoe=y
+CONFIG_PACKAGE_luci-syncdial=y
 
-        # LUCI 同步拨号
-        CONFIG_PACKAGE_luci‑app‑syncdial=y
+# DDNS Cloudflare
+CONFIG_PACKAGE_luci-app-ddns=y
+CONFIG_PACKAGE_ddns-scripts=y
+CONFIG_PACKAGE_ddns-scripts-cloudflare=y
 
-        # LUCI DDNS Cloudflare‑V4
-        CONFIG_PACKAGE_luci‑app‑ddns=y
-        CONFIG_PACKAGE_ddns‑scripts_cloudflare_v4=y
+# AdGuardHome UI Only
+CONFIG_PACKAGE_luci-app-adguardhome=y
+CONFIG_ADGUARDHOME_INCLUDE_CORE=n
 
-        # Web UI
-        CONFIG_PACKAGE_luci=y
-        CONFIG_PACKAGE_luci‑base=y
-        CONFIG_PACKAGE_luci‑theme‑bootstrap=y
+# SmartDNS UI Only
+CONFIG_PACKAGE_luci-app-smartdns=y
+CONFIG_SMARTDNS_INCLUDE_BIN=n
 
-        # 指定需要的 LUCI 程序
-        CONFIG_PACKAGE_luci‑app‑adg=y
-        CONFIG_PACKAGE_luci‑app‑smartdns=y
+# Passwall UI Only
+CONFIG_PACKAGE_luci-app-passwall=y
+CONFIG_PASSWALL_INCLUDE_PLUGINS=n
 
-        # Passwall 仅主程序
-        CONFIG_PACKAGE_luci‑app‑passwall=y
+# Small Package Repo
+CONFIG_OPTS=smp
 
-        # Drivers: Intel & USB
-        CONFIG_PACKAGE_kmod‑e1000e=y
-        CONFIG_PACKAGE_kmod‑usb‑core=y
-        CONFIG_PACKAGE_kmod‑usb‑net=y
+# X86-64 NIC Drivers
+CONFIG_PACKAGE_kmod-e1000=y
+CONFIG_PACKAGE_kmod-e1000e=y
+CONFIG_PACKAGE_kmod-igb=y
+CONFIG_PACKAGE_kmod-ixgbe=y
+CONFIG_PACKAGE_kmod-i40e=y
+CONFIG_PACKAGE_kmod-iavf=y
+CONFIG_PACKAGE_kmod-bnx2=y
+CONFIG_PACKAGE_kmod-bnx2x=y
+CONFIG_PACKAGE_kmod-tg3=y
+CONFIG_PACKAGE_kmod-8139cp=y
+CONFIG_PACKAGE_kmod-8139too=y
+CONFIG_PACKAGE_kmod-r8169=y
+CONFIG_PACKAGE_kmod-ae=y
+CONFIG_PACKAGE_kmod-fm10k=y
 
-        # IPv6 支持网络
-        CONFIG_PACKAGE_ip6tables=y
+# USB NIC
+CONFIG_PACKAGE_kmod-usb-core=y
+CONFIG_PACKAGE_kmod-usb-net=y
+CONFIG_PACKAGE_kmod-usb-net-asix=y
+CONFIG_PACKAGE_kmod-usb-net-rtl8152=y
+CONFIG_PACKAGE_kmod-usb-net-rtl8150=y
+CONFIG_PACKAGE_kmod-usb-net-rtl8153=y
+CONFIG_PACKAGE_kmod-usb-net-rndis=y
+CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y
+CONFIG_PACKAGE_kmod-usb-net-smsc95xx=y
 
-        EOF
+# VLAN & Dummy
+CONFIG_PACKAGE_kmod-8021q=y
+CONFIG_PACKAGE_kmod-dummy=y
 
-    - name: 自动调整配置
-      run: yes "" | make oldconfig
+# Virtual NIC
+CONFIG_PACKAGE_kmod-vmxnet3=y
+CONFIG_PACKAGE_kmod-veth=y
 
-    - name: 开始编译
-      run: |
-        make -j$(nproc) V=s
+EOF
 
-    - name: 打包固件日志与配置
-      run: |
-        mkdir -p artifacts
-        cp .config artifacts/openwrt_x86_64_exported_config
-        cp -r bin/targets/x86/64 artifacts/
+      - name: 📊 Validate Config
+        run: |
+          cd openwrt
+          make defconfig
 
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v3
-      with:
-        name: openwrt‑x86_64‑24.10
-        path: artifacts/
+      - name: 🛠 Start Build
+        run: |
+          cd openwrt
+          make -j$(nproc) V=s
+
+      - name: 📥 Upload Firmware Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: openwrt-x86_64-full-nic
+          path: |
+            openwrt/bin/targets/x86/64/
+            openwrt/build_dir/
+
+      - name: 🧾 Build Summary
+        run: |
+          echo "✔ Build completed"
