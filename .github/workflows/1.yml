@@ -1,4 +1,4 @@
-name: OpenWrt-24.10-x86_64-Generic-Final-Fixed
+name: OpenWrt-24.10-x86_64-Generic-FINAL-SAFE
 
 on:
   workflow_dispatch:
@@ -42,20 +42,26 @@ jobs:
       run: |
         git clone --depth=1 -b $REPO_BRANCH $REPO_URL openwrt
 
-    - name: Update feeds & add third-party packages
+    - name: Update feeds & add third-party packages (SAFE MODE)
       working-directory: openwrt
       run: |
+        # enable luci
         sed -i 's|#src-git luci|src-git luci|g' feeds.conf.default
 
+        # ONLY real feeds (can generate index)
         echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall" >> feeds.conf.default
         echo "src-git smartdns https://github.com/pymumu/openwrt-smartdns" >> feeds.conf.default
-        echo "src-git syncdial https://github.com/kuoruan/openwrt-syncdial" >> feeds.conf.default
 
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-        # AdGuardHome LuCI (sbwml) - MUST be manual clone
+        # ===== Single-package repos (MUST manual clone) =====
+
+        # AdGuardHome LuCI
         git clone --depth=1 https://github.com/sbwml/luci-app-adguardhome package/luci-app-adguardhome
+
+        # SyncDial
+        git clone --depth=1 https://github.com/kuoruan/openwrt-syncdial package/syncdial
 
     - name: Generate .config
       working-directory: openwrt
@@ -118,6 +124,7 @@ jobs:
         CONFIG_PACKAGE_wget=y
         CONFIG_PACKAGE_unzip=y
 
+        # Images
         CONFIG_GRUB_IMAGES=y
         CONFIG_VMDK_IMAGES=y
         CONFIG_VHDX_IMAGES=y
@@ -138,7 +145,7 @@ jobs:
     - name: Upload firmware
       uses: actions/upload-artifact@v4
       with:
-        name: OpenWrt-24.10-x86_64-Generic-Final-Fixed
+        name: OpenWrt-24.10-x86_64-Generic-FINAL-SAFE
         path: |
           openwrt/bin/targets/x86/64/*.img*
           openwrt/bin/targets/x86/64/*.gz
