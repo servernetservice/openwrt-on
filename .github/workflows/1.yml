@@ -1,7 +1,6 @@
-name: Build-OpenWrt-24.10
+name: Build-OpenWrt-24.10-Pro
 
 on:
-  repository_dispatch:
   workflow_dispatch:
 
 env:
@@ -24,10 +23,8 @@ jobs:
           tool-cache: true
           android: true
           dotnet: true
-          haskell: true
           large-packages: true
           docker-images: true
-          swap-storage: true
 
       - name: Initialization Environment
         env:
@@ -35,6 +32,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev swig libpython3-dev libelf-dev lzma liblzma-dev zstd libzstd-dev
+          
+          # 核心修复：升级 Go 环境到 1.24.x
+          wget https://go.dev/dl/go1.24.0.linux-amd64.tar.gz
+          sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz
+          export PATH=$PATH:/usr/local/go/bin
+          echo "/usr/local/go/bin" >> $GITHUB_PATH
+
           sudo timedatectl set-timezone "$TZ"
           sudo mkdir -p /workdir
           sudo chown $USER:$GROUPS /workdir
@@ -42,13 +46,13 @@ jobs:
       - name: Clone Source Code
         working-directory: /workdir
         run: |
-          df -hT $PWD
           git clone $REPO_URL -b $REPO_BRANCH openwrt
           ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
       - name: Update & Install Feeds
         run: |
           cd openwrt
+          # 优先选择第三方源
           echo "src-git kenzo https://github.com/kenzok8/openwrt-packages" >> feeds.conf.default
           echo "src-git small https://github.com/kenzok8/small" >> feeds.conf.default
           ./scripts/feeds update -a
@@ -56,25 +60,37 @@ jobs:
 
       - name: Load Custom Configuration
         run: |
-          [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
           cd openwrt
-          # 强制设置 X86_64 及必备驱动和插件
+          # 写入你要求的所有配置
           cat >> .config <<EOF
           CONFIG_TARGET_x86=y
           CONFIG_TARGET_x86_64=y
           CONFIG_TARGET_x86_64_DEVICE_generic=y
+          
+          # 网卡驱动 (Intel E1000/E1000E + USB)
           CONFIG_PACKAGE_kmod-e1000=y
           CONFIG_PACKAGE_kmod-e1000e=y
+          CONFIG_PACKAGE_kmod-usb-net=y
           CONFIG_PACKAGE_kmod-usb-net-asix=y
+          CONFIG_PACKAGE_kmod-usb-net-asix-ax88179=y
           CONFIG_PACKAGE_kmod-usb-net-rtl8152=y
+          
+          # 主题与 IPv6
           CONFIG_PACKAGE_luci-theme-bootstrap=y
+          CONFIG_PACKAGE_ipv6helper=y
+          
+          # 插件：多拨、DDNS、AdGuardHome、SmartDNS、Passwall
           CONFIG_PACKAGE_luci-app-syncdial=y
-          CONFIG_PACKAGE_luci-app-smartdns=y
-          CONFIG_PACKAGE_luci-app-adguardhome=y
-          CONFIG_PACKAGE_luci-app-passwall=y
           CONFIG_PACKAGE_luci-app-ddns=y
           CONFIG_PACKAGE_ddns-scripts-cloudflare=y
+          CONFIG_PACKAGE_luci-app-adguardhome=y
+          CONFIG_PACKAGE_luci-app-smartdns=y
+          CONFIG_PACKAGE_luci-app-passwall=y
+          # Passwall 依赖组件（确保不编译内核）
+          CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y
           EOF
+          
+          # 清理并生成最终配置
           make defconfig
 
       - name: Download Package
@@ -89,6 +105,7 @@ jobs:
         run: |
           cd openwrt
           echo -e "$(nproc) thread compile"
+          # 自动错误重试机制
           make -j$(nproc) || make -j1 || make -j1 V=s
           echo "status=success" >> $GITHUB_OUTPUT
 
@@ -96,5 +113,5 @@ jobs:
         uses: actions/upload-artifact@v4
         if: steps.compile.outputs.status == 'success'
         with:
-          name: OpenWrt_x86_64_Firmware
+          name: OpenWrt_24.10_x86_64
           path: openwrt/bin/targets/x86/64/
